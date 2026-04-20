@@ -25,7 +25,7 @@ MODEL_NAME = "gpt-4o"
 APP_ROOT = Path(__file__).resolve().parent
 SAVED_KB_XLSX_PATH = APP_ROOT / "saved_knowledge_base.xlsx"
 SAVED_KB_ORIG_NAME_PATH = APP_ROOT / "saved_filename.txt"
-SECRETS_TOML_PATH = APP_ROOT / ".streamlit" / "secrets.toml"
+SECRETS_TOML_PATH = APP_ROOT / "hotel_credentials.toml"
 
 # Default IMAP host for Gmail; any provider can override via secrets / settings.
 IMAP_SERVER_DEFAULT = "imap.gmail.com"
@@ -279,7 +279,7 @@ UI: dict[str, dict[str, str]] = {
         "settings_app_pw": "App Password",
         "settings_openai": "OpenAI API Key",
         "settings_save": "Save & Verify",
-        "settings_success": "Credentials verified and saved to `.streamlit/secrets.toml`.",
+        "settings_success": "Credentials verified and saved to `hotel_credentials.toml`.",
         "settings_fail": "Verification or save failed.",
         "automata_status_running": "Automation: :green[**RUNNING**]",
         "automata_status_stopped": "Automation: :red[**STOPPED**]",
