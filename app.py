@@ -25,7 +25,6 @@ MODEL_NAME = "gpt-4o"
 APP_ROOT = Path(__file__).resolve().parent
 SAVED_KB_XLSX_PATH = APP_ROOT / "saved_knowledge_base.xlsx"
 SAVED_KB_ORIG_NAME_PATH = APP_ROOT / "saved_filename.txt"
-SECRETS_TOML_PATH = APP_ROOT / "hotel_credentials.toml"
 
 # Default IMAP host for Gmail; any provider can override via secrets / settings.
 IMAP_SERVER_DEFAULT = "imap.gmail.com"
@@ -100,6 +99,21 @@ def _get_streamlit_secret(key: str) -> str | None:
     return s or None
 
 
+def _get_streamlit_secret_value(*keys: str, default: str = "") -> str:
+    for k in keys:
+        v = _get_streamlit_secret(k)
+        if v:
+            return v
+    return default
+
+
+def _get_session_value(key: str) -> str:
+    try:
+        return str(st.session_state.get(key) or "").strip()
+    except Exception:
+        return ""
+
+
 def _get_config_value(*keys: str, default: str = "") -> str:
     """
     Resolve config from env first, then Streamlit secrets, then default.
@@ -142,14 +156,15 @@ DRAFT_EMAIL_APP_PASSWORD = _get_config_value(
 
 
 def _reload_runtime_credentials() -> None:
-    """Re-read credentials from environment / Streamlit secrets into module globals."""
+    """Re-read credentials from session state, env, then Streamlit secrets."""
     global OPENAI_API_KEY, IMAP_SERVER_ADDRESS, EMAIL_ADDRESS, EMAIL_APP_PASSWORD, GMAIL_USER, GMAIL_PASSWORD, DRAFT_EMAIL_ADDRESS, DRAFT_EMAIL_APP_PASSWORD
-    OPENAI_API_KEY = _get_config_value("OPENAI_API_KEY", default="")
+    OPENAI_API_KEY = _get_session_value("settings_form_openai_key") or _get_config_value("OPENAI_API_KEY", default="")
     IMAP_SERVER_ADDRESS = _normalize_imap_server_address(
-        _get_config_value("IMAP_SERVER", "IMAP_SERVER_ADDRESS", "IMAP_HOST", default=IMAP_SERVER_DEFAULT)
+        _get_session_value("settings_form_imap")
+        or _get_config_value("IMAP_SERVER", "IMAP_SERVER_ADDRESS", "IMAP_HOST", default=IMAP_SERVER_DEFAULT)
     )
-    EMAIL_ADDRESS = _get_config_value("GMAIL_USER", "EMAIL_ADDRESS", default="")
-    EMAIL_APP_PASSWORD = _get_config_value("GMAIL_PASSWORD", "EMAIL_APP_PASSWORD", default="")
+    EMAIL_ADDRESS = _get_session_value("settings_form_gmail") or _get_config_value("GMAIL_USER", "EMAIL_ADDRESS", default="")
+    EMAIL_APP_PASSWORD = _get_session_value("settings_form_app_password") or _get_config_value("GMAIL_PASSWORD", "EMAIL_APP_PASSWORD", default="")
     GMAIL_USER = EMAIL_ADDRESS
     GMAIL_PASSWORD = EMAIL_APP_PASSWORD
     DRAFT_EMAIL_ADDRESS = _get_config_value(
@@ -162,43 +177,6 @@ def _reload_runtime_credentials() -> None:
         "GMAIL_DRAFT_PASSWORD",
         default=EMAIL_APP_PASSWORD,
     )
-
-
-def _toml_escape_double_quoted(value: str) -> str:
-    return (value or "").replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _read_optional_draft_secret_lines() -> str:
-    """Preserve optional draft-account lines when rewriting secrets.toml."""
-    if not SECRETS_TOML_PATH.exists():
-        return ""
-    keep: list[str] = []
-    try:
-        for line in SECRETS_TOML_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = line.strip()
-            if s.startswith("#") or not s:
-                continue
-            if s.upper().startswith("DRAFT_") or s.upper().startswith("GMAIL_DRAFT"):
-                keep.append(line.rstrip())
-    except Exception:
-        return ""
-    if not keep:
-        return ""
-    return "\n".join(["", "## Optional: save drafts to a different Gmail account.", *keep, ""])
-
-
-def _write_secrets_toml(imap_server: str, gmail_user: str, gmail_password: str) -> None:
-    SECRETS_TOML_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tail = _read_optional_draft_secret_lines()
-    imap_host = _normalize_imap_server_address(imap_server)
-    body = (
-        "## Managed by AI Complaint Handler — do not commit real secrets to public repositories.\n"
-        f'IMAP_SERVER = "{_toml_escape_double_quoted(imap_host)}"\n'
-        f'GMAIL_USER = "{_toml_escape_double_quoted(gmail_user)}"\n'
-        f'GMAIL_PASSWORD = "{_toml_escape_double_quoted(gmail_password)}"\n'
-        f"{tail}"
-    )
-    SECRETS_TOML_PATH.write_text(body, encoding="utf-8")
 
 
 def _get_server_openai_api_key() -> str:
@@ -240,7 +218,7 @@ UI: dict[str, dict[str, str]] = {
         "kb_header": "Knowledge base",
         "primary_lang": "Primary language (for internal translations)",
         "spoken_langs": "Spoken languages (comma-separated)",
-        "openai_missing": "Security warning: server configuration is incomplete. Missing `OPENAI_API_KEY` in environment variables or Streamlit secrets.",
+        "openai_missing": "Security warning: server configuration is incomplete. Missing `OPENAI_API_KEY` in session, environment variables or Streamlit secrets.",
         "active_db": "Active database:",
         "active_kb_loaded": "Active knowledge base loaded",
         "upload_new": "Upload Master Database (Excel)",
@@ -279,7 +257,7 @@ UI: dict[str, dict[str, str]] = {
         "settings_app_pw": "App Password",
         "settings_openai": "OpenAI API Key",
         "settings_save": "Save & Verify",
-        "settings_success": "Credentials verified and saved to `hotel_credentials.toml`.",
+        "settings_success": "Credentials verified and saved for this session.",
         "settings_fail": "Verification or save failed.",
         "automata_status_running": "Automation: :green[**RUNNING**]",
         "automata_status_stopped": "Automation: :red[**STOPPED**]",
@@ -672,7 +650,7 @@ def _get_openai_client() -> OpenAI:
     key = _get_server_openai_api_key()
     if not key or key in {"", "ide-masold-be-a-kulcsot"}:
         raise ValueError(
-            "Missing OpenAI API key. Set OPENAI_API_KEY as an environment variable or in Streamlit secrets."
+            "Missing OpenAI API key. Set it in this session, as OPENAI_API_KEY environment variable, or in Streamlit secrets."
         )
     return OpenAI(api_key=key)
 
@@ -1738,20 +1716,21 @@ st.title("🤖 Flow AI MailBot")
 st.markdown("---")
 
 if "settings_form_imap" not in st.session_state:
-    st.session_state["settings_form_imap"] = _normalize_imap_server_address(
-        _get_config_value("IMAP_SERVER", "IMAP_SERVER_ADDRESS", "IMAP_HOST", default=IMAP_SERVER_DEFAULT)
-    )
+    imap_secret_default = _get_streamlit_secret_value("IMAP_SERVER", "IMAP_SERVER_ADDRESS", "IMAP_HOST", default="")
+    st.session_state["settings_form_imap"] = _normalize_imap_server_address(imap_secret_default) if imap_secret_default else ""
 if "settings_form_gmail" not in st.session_state:
-    st.session_state["settings_form_gmail"] = _get_config_value("GMAIL_USER", "EMAIL_ADDRESS", default="")
+    st.session_state["settings_form_gmail"] = _get_streamlit_secret_value("GMAIL_USER", "EMAIL_ADDRESS", default="")
 if "settings_form_app_password" not in st.session_state:
-    st.session_state["settings_form_app_password"] = _get_config_value("GMAIL_PASSWORD", "EMAIL_APP_PASSWORD", default="")
+    st.session_state["settings_form_app_password"] = _get_streamlit_secret_value("GMAIL_PASSWORD", "EMAIL_APP_PASSWORD", default="")
+if "settings_form_openai_key" not in st.session_state:
+    st.session_state["settings_form_openai_key"] = _get_streamlit_secret_value("OPENAI_API_KEY", default="")
 
 with st.container():
     st.subheader(t("settings_panel"))
     with st.form("system_credentials_form"):
         imap_in = st.text_input(
             t("settings_imap"),
-            value=str(st.session_state.get("settings_form_imap") or IMAP_SERVER_DEFAULT),
+            value=str(st.session_state.get("settings_form_imap") or ""),
             placeholder=t("settings_imap_placeholder"),
             help=t("settings_imap_help"),
         )
@@ -1764,34 +1743,30 @@ with st.container():
             value=str(st.session_state.get("settings_form_app_password") or ""),
             type="password",
         )
+        openai_key_in = st.text_input(
+            t("settings_openai"),
+            value=str(st.session_state.get("settings_form_openai_key") or ""),
+            type="password",
+        )
         save_verify = st.form_submit_button(t("settings_save"), use_container_width=True)
 
     if save_verify:
         try:
             gmail_clean = (gmail_in or "").strip()
             pw_clean = (gmail_pw_in or "").strip()
-            if not (gmail_clean and pw_clean):
-                raise ValueError("Gmail address and Gmail app password are required.")
+            openai_clean = (openai_key_in or "").strip()
+            if not (gmail_clean and pw_clean and openai_clean):
+                raise ValueError("Gmail address, Gmail app password and OpenAI API key are required.")
 
             imap_clean = _normalize_imap_server_address(imap_in or IMAP_SERVER_DEFAULT)
-            server_openai_key = _get_server_openai_api_key()
-            if not server_openai_key:
-                raise ValueError("Server configuration missing OPENAI_API_KEY in environment variables or Streamlit secrets.")
-
             _verify_imap_login(imap_clean, gmail_clean, pw_clean)
-            _verify_openai_api_key(server_openai_key)
-
-            _write_secrets_toml(imap_clean, gmail_clean, pw_clean)
-
-            # Force runtime to pick up the freshly saved values immediately (env wins over cached secrets).
-            os.environ["IMAP_SERVER"] = imap_clean
-            os.environ["GMAIL_USER"] = gmail_clean
-            os.environ["GMAIL_PASSWORD"] = pw_clean
-            _reload_runtime_credentials()
+            _verify_openai_api_key(openai_clean)
 
             st.session_state["settings_form_imap"] = imap_clean
             st.session_state["settings_form_gmail"] = gmail_clean
             st.session_state["settings_form_app_password"] = pw_clean
+            st.session_state["settings_form_openai_key"] = openai_clean
+            _reload_runtime_credentials()
             st.session_state["system_credentials_verified"] = True
             st.session_state["_boot_credential_checked"] = True
             st.session_state.pop("boot_credential_error", None)
