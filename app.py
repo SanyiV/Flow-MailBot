@@ -116,17 +116,17 @@ def _get_session_value(key: str) -> str:
 
 def _get_config_value(*keys: str, default: str = "") -> str:
     """
-    Resolve config from env first, then Streamlit secrets, then default.
+    Resolve config from Streamlit secrets first, then env, then default.
     Accepts multiple possible key aliases.
     """
-    for k in keys:
-        v = (os.getenv(k) or "").strip()
-        if v:
-            return v
     for k in keys:
         v2 = _get_streamlit_secret(k)
         if v2:
             return v2
+    for k in keys:
+        v = (os.getenv(k) or "").strip()
+        if v:
+            return v
     return default
 
 
@@ -180,7 +180,7 @@ def _reload_runtime_credentials() -> None:
 
 
 def _get_server_openai_api_key() -> str:
-    return (_get_config_value("OPENAI_API_KEY", default="") or "").strip()
+    return (_get_session_value("settings_form_openai_key") or _get_config_value("OPENAI_API_KEY", default="") or "").strip()
 
 
 def _verify_imap_login(imap_server: str, gmail_user: str, gmail_app_password: str) -> None:
@@ -252,7 +252,7 @@ UI: dict[str, dict[str, str]] = {
         "settings_panel": "System Settings & Credentials",
         "settings_imap": "IMAP server address",
         "settings_imap_help": "Hostname only (e.g. `imap.gmail.com`, `outlook.office365.com`). Gmail default: `imap.gmail.com`.",
-        "settings_imap_placeholder": "https://www.google.com/search?q=imap.gmail.com",
+        "settings_imap_placeholder": "e.g., imap.gmail.com",
         "settings_gmail": "Email Address",
         "settings_app_pw": "App Password",
         "settings_openai": "OpenAI API Key",
@@ -1775,6 +1775,7 @@ with st.container():
         except Exception as e:
             st.session_state["system_credentials_verified"] = False
             st.error(f"{t('settings_fail')} {e}")
+    st.info("💡 Tip: To save credentials permanently so they survive page reloads and run in the background, add them to your Streamlit App's Advanced Settings -> Secrets.")
 
 _ensure_boot_credential_state()
 if st.session_state.get("boot_credential_error"):
@@ -1930,7 +1931,11 @@ with st.sidebar:
 
     if start_clicked:
         primary_language_input = str(st.session_state.get("primary_language") or "").strip()
-        if not primary_language_input:
+        kb_current = st.session_state.get("kb_df")
+        if kb_current is None or getattr(kb_current, "empty", True):
+            st.session_state["automation_should_run"] = False
+            st.error("Please upload the Knowledge Base (Excel) before starting!")
+        elif not primary_language_input:
             st.session_state["automation_should_run"] = False
             st.error("Error: Primary language is required to start the automation.")
         else:
