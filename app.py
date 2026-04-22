@@ -171,6 +171,21 @@ def _get_config_list(*keys: str) -> list[str]:
     return []
 
 
+def _get_persisted_primary_language() -> str:
+    candidate = (_get_config_value("PRIMARY_LANGUAGE", default=PRIMARY_LANGUAGE_DEFAULT) or "").strip()
+    if candidate in LANGUAGE_OPTIONS:
+        return candidate
+    return PRIMARY_LANGUAGE_DEFAULT
+
+
+def _get_persisted_spoken_languages() -> list[str]:
+    configured = [lang for lang in _get_config_list("SPOKEN_LANGUAGES") if lang in LANGUAGE_OPTIONS]
+    if configured:
+        return configured
+    fallback = [lang for lang in SPOKEN_LANGUAGES_DEFAULT_LIST if lang in LANGUAGE_OPTIONS]
+    return fallback or [PRIMARY_LANGUAGE_DEFAULT]
+
+
 OPENAI_API_KEY = _get_config_value("OPENAI_API_KEY", default="")
 IMAP_SERVER_ADDRESS = _normalize_imap_server_address(
     _get_config_value("IMAP_SERVER", "IMAP_SERVER_ADDRESS", "IMAP_HOST", default=IMAP_SERVER_DEFAULT)
@@ -1216,8 +1231,8 @@ def _run_generate_response(complaint_text: str, kb_df: pd.DataFrame | None) -> N
         draft = _generate_reply_letter(
             complaint_clean,
             selection,
-            primary_language=st.session_state.get("primary_language", PRIMARY_LANGUAGE_DEFAULT),
-            spoken_languages=_normalize_spoken_languages_for_prompt(st.session_state.get("spoken_languages")),
+            primary_language=_get_persisted_primary_language(),
+            spoken_languages=_normalize_spoken_languages_for_prompt(_get_persisted_spoken_languages()),
         )
         # Source of truth for the editable draft in the UI.
         st.session_state["draft_response"] = draft
@@ -1821,11 +1836,9 @@ if "settings_form_imap" not in st.session_state:
 if "settings_form_gmail" not in st.session_state:
     st.session_state["settings_form_gmail"] = _get_config_value("GMAIL_USER", "EMAIL_ADDRESS", default="")
 if "primary_language" not in st.session_state:
-    primary_default = _get_config_value("PRIMARY_LANGUAGE", default="")
-    st.session_state["primary_language"] = primary_default if primary_default in LANGUAGE_OPTIONS else None
+    st.session_state["primary_language"] = _get_persisted_primary_language()
 if "spoken_languages" not in st.session_state:
-    spoken_defaults = _get_config_list("SPOKEN_LANGUAGES")
-    st.session_state["spoken_languages"] = [lang for lang in spoken_defaults if lang in LANGUAGE_OPTIONS]
+    st.session_state["spoken_languages"] = _get_persisted_spoken_languages()
 
 with st.container():
     st.subheader(t("settings_panel"))
@@ -1863,11 +1876,13 @@ with st.container():
             imap_clean = _normalize_imap_server_address(imap_in or IMAP_SERVER_DEFAULT)
             _verify_imap_login(imap_clean, gmail_clean, pw_clean)
             _verify_openai_api_key(openai_clean)
-            primary_clean = str(st.session_state.get("primary_language") or "").strip()
+            primary_clean = str(st.session_state.get("primary_language") or _get_persisted_primary_language()).strip()
             spoken_clean = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
             spoken_clean = [lang for lang in spoken_clean if lang in LANGUAGE_OPTIONS]
+            if not spoken_clean:
+                spoken_clean = _get_persisted_spoken_languages()
             if not primary_clean:
-                raise ValueError("Primary language is required.")
+                primary_clean = _get_persisted_primary_language()
 
             _write_secrets_toml(
                 imap_clean,
@@ -1954,16 +1969,10 @@ with st.sidebar:
         st.session_state["worker_thread"] = None
     if "worker_stop_event" not in st.session_state:
         st.session_state["worker_stop_event"] = None
-    if "worker_primary_language" not in st.session_state:
-        st.session_state["worker_primary_language"] = PRIMARY_LANGUAGE_DEFAULT
-    if "worker_spoken_languages" not in st.session_state:
-        st.session_state["worker_spoken_languages"] = _normalize_spoken_languages_for_prompt(SPOKEN_LANGUAGES_DEFAULT_LIST)
     if "primary_language" not in st.session_state:
-        primary_default = _get_config_value("PRIMARY_LANGUAGE", default="")
-        st.session_state["primary_language"] = primary_default if primary_default in LANGUAGE_OPTIONS else None
+        st.session_state["primary_language"] = _get_persisted_primary_language()
     if "spoken_languages" not in st.session_state:
-        spoken_defaults = _get_config_list("SPOKEN_LANGUAGES")
-        st.session_state["spoken_languages"] = [lang for lang in spoken_defaults if lang in LANGUAGE_OPTIONS]
+        st.session_state["spoken_languages"] = _get_persisted_spoken_languages()
 
     cred_ok = bool(st.session_state.get("system_credentials_verified"))
     should_run = bool(st.session_state.get("automation_should_run"))
@@ -1983,8 +1992,8 @@ with st.sidebar:
         st.session_state["automata_running"] = worker_alive
     elif should_run:
         if not worker_alive:
-            primary_language = str(st.session_state.get("worker_primary_language") or PRIMARY_LANGUAGE_DEFAULT).strip() or PRIMARY_LANGUAGE_DEFAULT
-            spoken_languages = _normalize_spoken_languages_for_prompt(st.session_state.get("worker_spoken_languages"))
+            primary_language = _get_persisted_primary_language()
+            spoken_languages = _normalize_spoken_languages_for_prompt(_get_persisted_spoken_languages())
 
             stop_event = threading.Event()
             st.session_state["worker_stop_event"] = stop_event
@@ -2052,7 +2061,7 @@ with st.sidebar:
     )
 
     if start_clicked:
-        primary_language_input = str(st.session_state.get("primary_language") or "").strip()
+        primary_language_input = _get_persisted_primary_language()
         kb_current = st.session_state.get("kb_df")
         if kb_current is None or getattr(kb_current, "empty", True):
             st.session_state["automation_should_run"] = False
@@ -2061,8 +2070,6 @@ with st.sidebar:
             st.session_state["automation_should_run"] = False
             st.error("Error: Primary language is required to start the automation.")
         else:
-            st.session_state["worker_primary_language"] = primary_language_input
-            st.session_state["worker_spoken_languages"] = _normalize_spoken_languages_for_prompt(st.session_state.get("spoken_languages"))
             st.session_state["automation_should_run"] = True
             st.session_state["automation_stop_requested"] = False
             st.rerun()
@@ -2078,7 +2085,11 @@ with st.sidebar:
     # Language settings
     spoken_langs_current = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
     spoken_langs_current = [lang for lang in spoken_langs_current if lang in LANGUAGE_OPTIONS]
+    if not spoken_langs_current:
+        spoken_langs_current = _get_persisted_spoken_languages()
     primary_current = st.session_state.get("primary_language")
+    if primary_current not in LANGUAGE_OPTIONS:
+        primary_current = _get_persisted_primary_language()
     primary_index = LANGUAGE_OPTIONS.index(primary_current) if primary_current in LANGUAGE_OPTIONS else None
 
     st.session_state["primary_language"] = st.selectbox(
