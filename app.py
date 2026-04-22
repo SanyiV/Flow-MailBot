@@ -2092,12 +2092,15 @@ with st.sidebar:
     if primary_current not in LANGUAGE_OPTIONS:
         primary_current = persisted_primary
         st.session_state["primary_language"] = primary_current
-    primary_index = LANGUAGE_OPTIONS.index(primary_current)
+    try:
+        primary_index = LANGUAGE_OPTIONS.index(primary_current)
+    except ValueError:
+        primary_index = 0
 
     spoken_current = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
     spoken_current = [lang for lang in spoken_current if lang in LANGUAGE_OPTIONS]
     if not spoken_current:
-        spoken_current = persisted_spoken
+        spoken_current = [lang for lang in persisted_spoken if lang in LANGUAGE_OPTIONS]
         st.session_state["spoken_languages"] = spoken_current
 
     st.selectbox(
