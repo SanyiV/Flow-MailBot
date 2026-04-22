@@ -27,6 +27,7 @@ APP_ROOT = Path(__file__).resolve().parent
 SAVED_KB_XLSX_PATH = APP_ROOT / "saved_knowledge_base.xlsx"
 SAVED_KB_ORIG_NAME_PATH = APP_ROOT / "saved_filename.txt"
 SECRETS_TOML_PATH = APP_ROOT / "hotel_credentials.toml"
+AUTOMATION_STATUS_PATH = APP_ROOT / "automation_status.txt"
 
 # Default IMAP host for Gmail; any provider can override via TOML/secrets/settings.
 IMAP_SERVER_DEFAULT = "imap.gmail.com"
@@ -289,6 +290,46 @@ def _write_secrets_toml(
         f"{tail}"
     )
     SECRETS_TOML_PATH.write_text(body, encoding="utf-8")
+
+
+def _persist_language_settings_to_toml() -> None:
+    """Persist current language selections without requiring Save & Verify."""
+    primary_clean = str(st.session_state.get("primary_language") or "").strip()
+    if primary_clean not in LANGUAGE_OPTIONS:
+        return
+    spoken_clean = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
+    spoken_clean = [lang for lang in spoken_clean if lang in LANGUAGE_OPTIONS]
+    try:
+        _write_secrets_toml(
+            _get_config_value("IMAP_SERVER", "IMAP_SERVER_ADDRESS", "IMAP_HOST", default=IMAP_SERVER_DEFAULT),
+            _get_config_value("GMAIL_USER", "EMAIL_ADDRESS", default=""),
+            _get_config_value("GMAIL_PASSWORD", "EMAIL_APP_PASSWORD", default=""),
+            _get_config_value("OPENAI_API_KEY", default=""),
+            primary_clean,
+            spoken_clean,
+        )
+    except Exception:
+        return
+
+
+def _read_automation_status_flag() -> str:
+    if not AUTOMATION_STATUS_PATH.exists():
+        return "STOPPED"
+    try:
+        raw = (AUTOMATION_STATUS_PATH.read_text(encoding="utf-8", errors="ignore") or "").strip().upper()
+    except Exception:
+        return "STOPPED"
+    return raw if raw in {"RUNNING", "STOPPED"} else "STOPPED"
+
+
+def _write_automation_status_flag(status: str) -> None:
+    val = (status or "").strip().upper()
+    if val not in {"RUNNING", "STOPPED"}:
+        return
+    try:
+        AUTOMATION_STATUS_PATH.write_text(val, encoding="utf-8")
+    except Exception:
+        return
 
 
 def _verify_imap_login(imap_server: str, gmail_user: str, gmail_app_password: str) -> None:
@@ -1136,6 +1177,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
         "CRITICAL RESPONSE-LANGUAGE RULE: line1 MUST be written in the detected incoming email language.\n"
         "Never answer the customer in Primary language unless the incoming email is actually in Primary language.\n"
         "Knowledge-base language is irrelevant for output language; it is only guidance for policy content.\n"
+        f"CRITICAL RULE: Evaluate the detected language of the incoming email. If it is NOT exactly '{primary_language}' AND NOT in the list of '{spoken_languages_norm or '(none)'}', you MUST append a new line with '--- INTERNAL TRANSLATION ---' at the very end of your response. Below that line, you MUST translate both the original customer email and your generated reply into '{primary_language}'. Failure to include this internal translation block for foreign languages will result in a system failure.\n"
         "Return ONLY valid JSON (no markdown, no extra text) with EXACTLY these keys:\n"
         "{\n"
         '  "line1": "...",\n'
@@ -1961,8 +2003,9 @@ with st.sidebar:
     st.header(t("kb_header"))
 
     # Background automation controls (pinned at top of sidebar)
+    persisted_run_flag = _read_automation_status_flag()
     if "automation_should_run" not in st.session_state:
-        st.session_state["automation_should_run"] = False
+        st.session_state["automation_should_run"] = persisted_run_flag == "RUNNING"
     if "automation_stop_requested" not in st.session_state:
         st.session_state["automation_stop_requested"] = False
     if "automata_running" not in st.session_state:
@@ -2018,7 +2061,7 @@ with st.sidebar:
         else:
             st.session_state["automata_running"] = False
 
-    running = bool(st.session_state.get("automata_running"))
+    running = persisted_run_flag == "RUNNING"
     active_primary_color = "#dc2626" if running else "#16a34a"
     active_primary_hover = "#b91c1c" if running else "#15803d"
     st.markdown(
@@ -2072,11 +2115,14 @@ with st.sidebar:
             st.session_state["automation_should_run"] = False
             st.error("Error: Primary language is required to start the automation.")
         else:
+            _persist_language_settings_to_toml()
+            _write_automation_status_flag("RUNNING")
             st.session_state["automation_should_run"] = True
             st.session_state["automation_stop_requested"] = False
             st.rerun()
 
     if stop_clicked:
+        _write_automation_status_flag("STOPPED")
         st.session_state["automation_should_run"] = False
         st.session_state["automation_stop_requested"] = True
         ev = st.session_state.get("worker_stop_event")
@@ -2109,12 +2155,14 @@ with st.sidebar:
         index=primary_index,
         placeholder="Select primary language",
         key="primary_language",
+        on_change=_persist_language_settings_to_toml,
     )
     st.multiselect(
         t("spoken_langs"),
         options=LANGUAGE_OPTIONS,
         default=spoken_current,
         key="spoken_languages",
+        on_change=_persist_language_settings_to_toml,
     )
 
     sidebar_openai_key = _get_server_openai_api_key()
