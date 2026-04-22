@@ -1132,8 +1132,10 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
     case_name = "UNKNOWN" if is_unknown_case else "KNOWN"
     system = (
         "You are a strict email-draft formatter.\n"
-        "Primary language is a HARD requirement. You MUST obey it exactly.\n"
-        "Detect the incoming complaint language first.\n"
+        "First, detect the language of the incoming original customer email.\n"
+        "CRITICAL RESPONSE-LANGUAGE RULE: line1 MUST be written in the detected incoming email language.\n"
+        "Never answer the customer in Primary language unless the incoming email is actually in Primary language.\n"
+        "Knowledge-base language is irrelevant for output language; it is only guidance for policy content.\n"
         "Return ONLY valid JSON (no markdown, no extra text) with EXACTLY these keys:\n"
         "{\n"
         '  "line1": "...",\n'
@@ -1144,7 +1146,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
         f"- Spoken languages list (treated as understood by staff) = {spoken_languages_norm or '(none)'}.\n"
         "- line1 must be a single line (no newline characters).\n"
         "- NEVER include markdown code fences.\n"
-        "- The customer-facing answer (line1) MUST always be written in the incoming email language.\n"
+        "- line1 MUST always be in the incoming email language; this rule has highest priority.\n"
         "- If Case type is UNKNOWN, line1 MUST be the Primary-language equivalent of this exact message:\n"
         '  "[ACTION REQUIRED] I could not process this email automatically."\n'
         "- Determine whether internal translation is needed:\n"
@@ -2082,26 +2084,34 @@ with st.sidebar:
             ev.set()
         st.rerun()
 
-    # Language settings
-    spoken_langs_current = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
-    spoken_langs_current = [lang for lang in spoken_langs_current if lang in LANGUAGE_OPTIONS]
-    if not spoken_langs_current:
-        spoken_langs_current = _get_persisted_spoken_languages()
-    primary_current = st.session_state.get("primary_language")
-    if primary_current not in LANGUAGE_OPTIONS:
-        primary_current = _get_persisted_primary_language()
-    primary_index = LANGUAGE_OPTIONS.index(primary_current) if primary_current in LANGUAGE_OPTIONS else None
+    # Language settings (strict persisted defaults from TOML/secrets).
+    persisted_primary = _get_persisted_primary_language()
+    persisted_spoken = _get_persisted_spoken_languages()
 
-    st.session_state["primary_language"] = st.selectbox(
+    primary_current = str(st.session_state.get("primary_language") or "").strip()
+    if primary_current not in LANGUAGE_OPTIONS:
+        primary_current = persisted_primary
+        st.session_state["primary_language"] = primary_current
+    primary_index = LANGUAGE_OPTIONS.index(primary_current)
+
+    spoken_current = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
+    spoken_current = [lang for lang in spoken_current if lang in LANGUAGE_OPTIONS]
+    if not spoken_current:
+        spoken_current = persisted_spoken
+        st.session_state["spoken_languages"] = spoken_current
+
+    st.selectbox(
         t("primary_lang"),
         options=LANGUAGE_OPTIONS,
         index=primary_index,
         placeholder="Select primary language",
+        key="primary_language",
     )
-    st.session_state["spoken_languages"] = st.multiselect(
+    st.multiselect(
         t("spoken_langs"),
         options=LANGUAGE_OPTIONS,
-        default=spoken_langs_current,
+        default=spoken_current,
+        key="spoken_languages",
     )
 
     sidebar_openai_key = _get_server_openai_api_key()
