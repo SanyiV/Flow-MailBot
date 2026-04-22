@@ -1177,7 +1177,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
         "CRITICAL RESPONSE-LANGUAGE RULE: line1 MUST be written in the detected incoming email language.\n"
         "Never answer the customer in Primary language unless the incoming email is actually in Primary language.\n"
         "Knowledge-base language is irrelevant for output language; it is only guidance for policy content.\n"
-        f"CRITICAL RULE: Evaluate the detected language of the incoming email. If it is NOT exactly '{primary_language}' AND NOT in the list of '{spoken_languages_norm or '(none)'}', you MUST append a new line with '--- INTERNAL TRANSLATION ---' at the very end of your response. Below that line, you MUST translate both the original customer email and your generated reply into '{primary_language}'. Failure to include this internal translation block for foreign languages will result in a system failure.\n"
+        f"CRITICAL RULE: Evaluate the detected language of the incoming email. If it is NOT exactly '{primary_language}' AND NOT in the list of '{spoken_languages_norm or '(none)'}', you MUST append a new line with '--- INTERNAL TRANSLATION ---' at the very end of your response. Under the '--- INTERNAL TRANSLATION ---' line, you MUST strictly translate the original customer email text into '{primary_language}'. Do not just copy the original foreign text. Then, also translate your generated response into '{primary_language}'. Failure to include this internal translation block for foreign languages will result in a system failure.\n"
         "Return ONLY valid JSON (no markdown, no extra text) with EXACTLY these keys:\n"
         "{\n"
         '  "line1": "...",\n'
@@ -1365,10 +1365,7 @@ def _discover_poll_mailboxes(mail: imaplib.IMAP4, stop_event: threading.Event | 
 
 def _search_unseen_uids(stop_event: threading.Event | None = None) -> list[tuple[str, str]]:
     """
-    Return unseen message refs as (mailbox, uid), newest-first per mailbox.
-
-    Important: use UID SEARCH, not SEARCH, to avoid confusing message sequence
-    numbers with stable UIDs (which can cause getting "stuck" on old messages).
+    Return unread message refs as (mailbox, uid), newest-first per mailbox.
     """
     _assert_not_stopped(stop_event)
     mail = imaplib.IMAP4_SSL(_normalize_imap_server_address(IMAP_SERVER_ADDRESS), timeout=IMAP_TIMEOUT_SECONDS)
@@ -1388,25 +1385,33 @@ def _search_unseen_uids(stop_event: threading.Event | None = None) -> list[tuple
                 continue
 
             _assert_not_stopped(stop_event)
-            status, response = mail.uid("search", None, "UNSEEN")
+            status, response = mail.search(None, "UNREAD")
             if (status or "").upper() != "OK":
-                print(f"[IMAP] uid SEARCH UNSEEN non-OK status={status} mailbox={mailbox} response={response}")
+                print(f"[IMAP] SEARCH UNREAD non-OK status={status} mailbox={mailbox} response={response}")
                 continue
 
             raw = (response[0] or b"")
-            uids_b = [x for x in raw.split() if x]
-            if not uids_b:
+            seq_ids_b = [x for x in raw.split() if x]
+            if not seq_ids_b:
                 continue
 
             # Newest-first.
             try:
-                uids_b = sorted(uids_b, key=lambda b: int(b), reverse=True)
+                seq_ids_b = sorted(seq_ids_b, key=lambda b: int(b), reverse=True)
             except Exception:
-                uids_b = list(reversed(uids_b))
+                seq_ids_b = list(reversed(seq_ids_b))
 
-            for u in uids_b:
+            for seq_id in seq_ids_b:
                 _assert_not_stopped(stop_event)
-                uid_str = u.decode(errors="ignore") if isinstance(u, bytes) else str(u)
+                fstatus, fdata = mail.fetch(seq_id, "(UID)")
+                if (fstatus or "").upper() != "OK" or not fdata or not fdata[0]:
+                    continue
+                raw_uid_hdr = fdata[0][0] if isinstance(fdata[0], tuple) else fdata[0]
+                raw_uid_str = raw_uid_hdr.decode(errors="ignore") if isinstance(raw_uid_hdr, bytes) else str(raw_uid_hdr)
+                m_uid = re.search(r"UID\s+(\d+)", raw_uid_str)
+                if not m_uid:
+                    continue
+                uid_str = m_uid.group(1).strip()
                 ref = (mailbox, uid_str)
                 if ref in seen_refs:
                     continue
@@ -1734,6 +1739,7 @@ def _save_reply_as_draft_and_mark_seen(
 def _automata_worker_loop(primary_language: str, spoken_languages: str, stop_event: threading.Event) -> None:
     primary_language = (primary_language or "").strip() or PRIMARY_LANGUAGE_DEFAULT
     spoken_languages = _normalize_spoken_languages_for_prompt(spoken_languages)
+    processed_email_ids: set[tuple[str, str]] = set()
     print(f"[Automata] Worker language params: primary_language={primary_language!r} spoken_languages={spoken_languages!r}")
     print("[Automata] Worker started.")
     while True:
@@ -1770,6 +1776,9 @@ def _automata_worker_loop(primary_language: str, spoken_languages: str, stop_eve
                 if stop_event.is_set():
                     print("[Automata] Stop requested during batch, worker exiting.")
                     return
+                email_ref = (source_mailbox, uid)
+                if email_ref in processed_email_ids:
+                    continue
 
                 try:
                     _assert_not_stopped(stop_event)
@@ -1849,6 +1858,7 @@ def _automata_worker_loop(primary_language: str, spoken_languages: str, stop_eve
                             f"UID={uid}; stopping batch before next email."
                         )
                         break
+                    processed_email_ids.add(email_ref)
                     print(f"[Automata] Processed mailbox={source_mailbox} UID={uid} -> draft saved + marked Seen.")
                 except InterruptedError:
                     print("[Automata] Stop requested during message processing, worker exiting.")
