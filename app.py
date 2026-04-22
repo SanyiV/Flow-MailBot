@@ -1177,7 +1177,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
         "CRITICAL RESPONSE-LANGUAGE RULE: line1 MUST be written in the detected incoming email language.\n"
         "Never answer the customer in Primary language unless the incoming email is actually in Primary language.\n"
         "Knowledge-base language is irrelevant for output language; it is only guidance for policy content.\n"
-        f"CRITICAL RULE: Evaluate the detected language of the incoming email. If it is NOT exactly '{primary_language}' AND NOT in the list of '{spoken_languages_norm or '(none)'}', you MUST append a new line with '--- INTERNAL TRANSLATION ---' at the very end of your response. Under the '--- INTERNAL TRANSLATION ---' line, you MUST strictly translate the original customer email text into '{primary_language}'. Do not just copy the original foreign text. Then, also translate your generated response into '{primary_language}'. Failure to include this internal translation block for foreign languages will result in a system failure.\n"
+        f"CRITICAL RULE: If the incoming email language is NOT exactly '{primary_language}' and NOT in '{spoken_languages_norm or '(none)'}', you MUST append this strict template at the very end of your response:\n\n--- BELSŐ FORDÍTÁS ---\nEredeti üzenet: [YOU MUST STRICTLY TRANSLATE THE CUSTOMER'S ORIGINAL EMAIL TEXT INTO {primary_language}]\nVálasz: [YOU MUST STRICTLY TRANSLATE YOUR GENERATED RESPONSE INTO {primary_language}]\n\nNever leave the text in the original language inside the internal translation block, and never translate to English unless English is the {primary_language}.\n"
         "Return ONLY valid JSON (no markdown, no extra text) with EXACTLY these keys:\n"
         "{\n"
         '  "line1": "...",\n'
@@ -1779,6 +1779,9 @@ def _automata_worker_loop(primary_language: str, spoken_languages: str, stop_eve
                 email_ref = (source_mailbox, uid)
                 if email_ref in processed_email_ids:
                     continue
+                # Guard against duplicate processing in slow cycles:
+                # reserve this email ref before any slow LLM call starts.
+                processed_email_ids.add(email_ref)
 
                 try:
                     _assert_not_stopped(stop_event)
@@ -1858,7 +1861,6 @@ def _automata_worker_loop(primary_language: str, spoken_languages: str, stop_eve
                             f"UID={uid}; stopping batch before next email."
                         )
                         break
-                    processed_email_ids.add(email_ref)
                     print(f"[Automata] Processed mailbox={source_mailbox} UID={uid} -> draft saved + marked Seen.")
                 except InterruptedError:
                     print("[Automata] Stop requested during message processing, worker exiting.")
