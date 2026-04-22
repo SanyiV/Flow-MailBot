@@ -101,6 +101,13 @@ def _get_streamlit_secret(key: str) -> str | None:
     return s or None
 
 
+def _get_streamlit_secret_raw(key: str):
+    try:
+        return st.secrets.get(key)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
 def _read_managed_credentials_toml() -> dict:
     """
     Read credentials from hotel_credentials.toml in the project root.
@@ -133,6 +140,35 @@ def _get_config_value(*keys: str, default: str = "") -> str:
         if v:
             return v
     return default
+
+
+def _get_config_list(*keys: str) -> list[str]:
+    def _coerce_list(value: object) -> list[str]:
+        if isinstance(value, list):
+            return [str(x).strip() for x in value if str(x).strip()]
+        if isinstance(value, tuple):
+            return [str(x).strip() for x in value if str(x).strip()]
+        if isinstance(value, str):
+            return [p.strip() for p in value.split(",") if p.strip()]
+        return []
+
+    managed = _read_managed_credentials_toml()
+    for k in keys:
+        if k in managed:
+            vals = _coerce_list(managed.get(k))
+            if vals:
+                return vals
+    for k in keys:
+        raw = _get_streamlit_secret_raw(k)
+        vals = _coerce_list(raw)
+        if vals:
+            return vals
+    for k in keys:
+        env_raw = os.getenv(k)
+        vals = _coerce_list(env_raw)
+        if vals:
+            return vals
+    return []
 
 
 OPENAI_API_KEY = _get_config_value("OPENAI_API_KEY", default="")
@@ -191,6 +227,11 @@ def _toml_escape_double_quoted(value: str) -> str:
     return (value or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _toml_string_array(values: list[str]) -> str:
+    out = [f'"{_toml_escape_double_quoted(v)}"' for v in values if str(v).strip()]
+    return "[" + ", ".join(out) + "]"
+
+
 def _read_optional_draft_secret_lines() -> str:
     """Preserve optional draft-account lines when rewriting hotel_credentials.toml."""
     if not SECRETS_TOML_PATH.exists():
@@ -210,16 +251,26 @@ def _read_optional_draft_secret_lines() -> str:
     return "\n".join(["", "## Optional: save drafts to a different Gmail account.", *keep, ""])
 
 
-def _write_secrets_toml(imap_server: str, gmail_user: str, gmail_password: str, openai_api_key: str) -> None:
+def _write_secrets_toml(
+    imap_server: str,
+    gmail_user: str,
+    gmail_password: str,
+    openai_api_key: str,
+    primary_language: str,
+    spoken_languages: list[str],
+) -> None:
     SECRETS_TOML_PATH.parent.mkdir(parents=True, exist_ok=True)
     tail = _read_optional_draft_secret_lines()
     imap_host = _normalize_imap_server_address(imap_server)
+    spoken_clean = [str(x).strip() for x in (spoken_languages or []) if str(x).strip()]
     body = (
         "## Managed by AI Complaint Handler — do not commit real secrets to public repositories.\n"
         f'OPENAI_API_KEY = "{_toml_escape_double_quoted(openai_api_key)}"\n'
         f'IMAP_SERVER = "{_toml_escape_double_quoted(imap_host)}"\n'
         f'GMAIL_USER = "{_toml_escape_double_quoted(gmail_user)}"\n'
         f'GMAIL_PASSWORD = "{_toml_escape_double_quoted(gmail_password)}"\n'
+        f'PRIMARY_LANGUAGE = "{_toml_escape_double_quoted(primary_language)}"\n'
+        f"SPOKEN_LANGUAGES = {_toml_string_array(spoken_clean)}\n"
         f"{tail}"
     )
     SECRETS_TOML_PATH.write_text(body, encoding="utf-8")
@@ -1053,7 +1104,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
     complaint_for_output = re.sub(r"\n{2,}", "\n\n", complaint_for_output)
 
     primary_language = (primary_language or "").strip() or PRIMARY_LANGUAGE_DEFAULT
-    _ = _normalize_spoken_languages_for_prompt(spoken_languages)  # legacy arg; primary language is the strict controller.
+    spoken_languages_norm = _normalize_spoken_languages_for_prompt(spoken_languages)
 
     match = bool(selection.get("match"))
     confidence = float(selection.get("confidence") or 0.0)
@@ -1075,22 +1126,27 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
         "}\n\n"
         "Rules:\n"
         f"- Primary language = {primary_language}.\n"
+        f"- Spoken languages list (treated as understood by staff) = {spoken_languages_norm or '(none)'}.\n"
         "- line1 must be a single line (no newline characters).\n"
         "- NEVER include markdown code fences.\n"
-        "- If Case type is UNKNOWN, line1 MUST be the localized equivalent (in Primary language) of this exact message:\n"
-        '  "[ACTION REQUIRED] I could not process this email automatically based on the knowledge base."\n'
-        "- If Case type is KNOWN, line1 must be the customer-facing reply in the incoming email language.\n"
-        "- If incoming email language != Primary language: internal_translation_block is MANDATORY and must be in Primary language.\n"
-        '- internal_translation_block must include, in this order:\n'
-        "  1) A clear separator line that is the Primary-language equivalent of '--- INTERNAL TRANSLATION ---'.\n"
+        "- The customer-facing answer (line1) MUST always be written in the incoming email language.\n"
+        "- If Case type is UNKNOWN, line1 MUST be the Primary-language equivalent of this exact message:\n"
+        '  "[ACTION REQUIRED] I could not process this email automatically."\n'
+        "- Determine whether internal translation is needed:\n"
+        "  * If incoming language == Primary language OR incoming language is included in Spoken languages: internal_translation_block MUST be empty.\n"
+        "  * Otherwise (third/foreign language): internal_translation_block is MANDATORY and MUST be in Primary language.\n"
+        "- For required internal_translation_block, include in this order:\n"
+        "  1) A separator line translated into Primary language, equivalent to: --- INTERNAL TRANSLATION ---\n"
         "  2) Translation of the incoming customer email into Primary language.\n"
         "  3) Translation of line1 into Primary language.\n"
-        "- If incoming email language == Primary language: internal_translation_block must be an empty string.\n"
+        "- Special fallback rule for UNKNOWN + third/foreign language:\n"
+        "  internal_translation_block must include at least the translated incoming customer email in Primary language.\n"
         "- Never include signatures, greetings metadata, or extra sections outside the required content."
     )
     user = (
         f"Case type: {case_name}\n"
         f"Primary language: {primary_language}\n"
+        f"Spoken languages: {spoken_languages_norm or '(none)'}\n"
         "Incoming complaint:\n"
         f"{complaint}\n\n"
         "Relevant knowledge-base entry:\n"
@@ -1118,7 +1174,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
 
     if not line1:
         if is_unknown_case:
-            line1 = "[ACTION REQUIRED] I could not process this email automatically based on the knowledge base."
+            line1 = "[ACTION REQUIRED] I could not process this email automatically."
         else:
             line1 = "Thank you for your message. We are reviewing your case based on our policy."
 
@@ -1764,6 +1820,12 @@ if "settings_form_imap" not in st.session_state:
     st.session_state["settings_form_imap"] = _normalize_imap_server_address(imap_default) if imap_default else ""
 if "settings_form_gmail" not in st.session_state:
     st.session_state["settings_form_gmail"] = _get_config_value("GMAIL_USER", "EMAIL_ADDRESS", default="")
+if "primary_language" not in st.session_state:
+    primary_default = _get_config_value("PRIMARY_LANGUAGE", default="")
+    st.session_state["primary_language"] = primary_default if primary_default in LANGUAGE_OPTIONS else None
+if "spoken_languages" not in st.session_state:
+    spoken_defaults = _get_config_list("SPOKEN_LANGUAGES")
+    st.session_state["spoken_languages"] = [lang for lang in spoken_defaults if lang in LANGUAGE_OPTIONS]
 
 with st.container():
     st.subheader(t("settings_panel"))
@@ -1801,8 +1863,20 @@ with st.container():
             imap_clean = _normalize_imap_server_address(imap_in or IMAP_SERVER_DEFAULT)
             _verify_imap_login(imap_clean, gmail_clean, pw_clean)
             _verify_openai_api_key(openai_clean)
+            primary_clean = str(st.session_state.get("primary_language") or "").strip()
+            spoken_clean = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
+            spoken_clean = [lang for lang in spoken_clean if lang in LANGUAGE_OPTIONS]
+            if not primary_clean:
+                raise ValueError("Primary language is required.")
 
-            _write_secrets_toml(imap_clean, gmail_clean, pw_clean, openai_clean)
+            _write_secrets_toml(
+                imap_clean,
+                gmail_clean,
+                pw_clean,
+                openai_clean,
+                primary_clean,
+                spoken_clean,
+            )
 
             st.session_state["settings_form_imap"] = imap_clean
             st.session_state["settings_form_gmail"] = gmail_clean
@@ -1884,6 +1958,12 @@ with st.sidebar:
         st.session_state["worker_primary_language"] = PRIMARY_LANGUAGE_DEFAULT
     if "worker_spoken_languages" not in st.session_state:
         st.session_state["worker_spoken_languages"] = _normalize_spoken_languages_for_prompt(SPOKEN_LANGUAGES_DEFAULT_LIST)
+    if "primary_language" not in st.session_state:
+        primary_default = _get_config_value("PRIMARY_LANGUAGE", default="")
+        st.session_state["primary_language"] = primary_default if primary_default in LANGUAGE_OPTIONS else None
+    if "spoken_languages" not in st.session_state:
+        spoken_defaults = _get_config_list("SPOKEN_LANGUAGES")
+        st.session_state["spoken_languages"] = [lang for lang in spoken_defaults if lang in LANGUAGE_OPTIONS]
 
     cred_ok = bool(st.session_state.get("system_credentials_verified"))
     should_run = bool(st.session_state.get("automation_should_run"))
@@ -1996,11 +2076,6 @@ with st.sidebar:
         st.rerun()
 
     # Language settings
-    if "primary_language" not in st.session_state:
-        st.session_state["primary_language"] = None
-    if "spoken_languages" not in st.session_state:
-        st.session_state["spoken_languages"] = []
-
     spoken_langs_current = _coerce_spoken_languages_list(st.session_state.get("spoken_languages"))
     spoken_langs_current = [lang for lang in spoken_langs_current if lang in LANGUAGE_OPTIONS]
     primary_current = st.session_state.get("primary_language")
