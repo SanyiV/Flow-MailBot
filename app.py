@@ -1720,10 +1720,6 @@ if "settings_form_imap" not in st.session_state:
     st.session_state["settings_form_imap"] = _normalize_imap_server_address(imap_secret_default) if imap_secret_default else ""
 if "settings_form_gmail" not in st.session_state:
     st.session_state["settings_form_gmail"] = _get_streamlit_secret_value("GMAIL_USER", "EMAIL_ADDRESS", default="")
-if "settings_form_app_password" not in st.session_state:
-    st.session_state["settings_form_app_password"] = _get_streamlit_secret_value("GMAIL_PASSWORD", "EMAIL_APP_PASSWORD", default="")
-if "settings_form_openai_key" not in st.session_state:
-    st.session_state["settings_form_openai_key"] = _get_streamlit_secret_value("OPENAI_API_KEY", default="")
 
 with st.container():
     st.subheader(t("settings_panel"))
@@ -1740,12 +1736,12 @@ with st.container():
         )
         gmail_pw_in = st.text_input(
             t("settings_app_pw"),
-            value=str(st.session_state.get("settings_form_app_password") or ""),
+            value=str(st.session_state.get("settings_form_app_password") or _get_streamlit_secret_value("GMAIL_PASSWORD", "EMAIL_APP_PASSWORD", default="")),
             type="password",
         )
         openai_key_in = st.text_input(
             t("settings_openai"),
-            value=str(st.session_state.get("settings_form_openai_key") or ""),
+            value=str(st.session_state.get("settings_form_openai_key") or _get_streamlit_secret_value("OPENAI_API_KEY", default="")),
             type="password",
         )
         save_verify = st.form_submit_button(t("settings_save"), use_container_width=True)
