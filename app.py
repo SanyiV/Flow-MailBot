@@ -1053,7 +1053,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
     complaint_for_output = re.sub(r"\n{2,}", "\n\n", complaint_for_output)
 
     primary_language = (primary_language or "").strip() or PRIMARY_LANGUAGE_DEFAULT
-    spoken_languages = _normalize_spoken_languages_for_prompt(spoken_languages)
+    _ = _normalize_spoken_languages_for_prompt(spoken_languages)  # legacy arg; primary language is the strict controller.
 
     match = bool(selection.get("match"))
     confidence = float(selection.get("confidence") or 0.0)
@@ -1066,25 +1066,31 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
     case_name = "UNKNOWN" if is_unknown_case else "KNOWN"
     system = (
         "You are a strict email-draft formatter.\n"
-        "Primary language is mandatory for internal translation: you MUST translate internal text into the provided primary language.\n"
-        "Detect the incoming complaint language.\n"
+        "Primary language is a HARD requirement. You MUST obey it exactly.\n"
+        "Detect the incoming complaint language first.\n"
         "Return ONLY valid JSON (no markdown, no extra text) with EXACTLY these keys:\n"
         "{\n"
         '  "line1": "...",\n'
-        '  "translated_original": "..."\n'
+        '  "internal_translation_block": "..."\n'
         "}\n\n"
         "Rules:\n"
-        f"- Always produce translated_original in {primary_language}.\n"
-        "- If the detected language of the complaint exactly matches the Primary language OR is included in the Spoken languages, you MUST leave 'translated_original' strictly empty.\n"
-        "- translated_original must contain the full meaning of the incoming complaint.\n"
+        f"- Primary language = {primary_language}.\n"
         "- line1 must be a single line (no newline characters).\n"
-        "- translated_original should be a single line when possible.\n"
-        "- Never include signatures, headers, or separators in line1/translated_original."
+        "- NEVER include markdown code fences.\n"
+        "- If Case type is UNKNOWN, line1 MUST be the localized equivalent (in Primary language) of this exact message:\n"
+        '  "[ACTION REQUIRED] I could not process this email automatically based on the knowledge base."\n'
+        "- If Case type is KNOWN, line1 must be the customer-facing reply in the incoming email language.\n"
+        "- If incoming email language != Primary language: internal_translation_block is MANDATORY and must be in Primary language.\n"
+        '- internal_translation_block must include, in this order:\n'
+        "  1) A clear separator line that is the Primary-language equivalent of '--- INTERNAL TRANSLATION ---'.\n"
+        "  2) Translation of the incoming customer email into Primary language.\n"
+        "  3) Translation of line1 into Primary language.\n"
+        "- If incoming email language == Primary language: internal_translation_block must be an empty string.\n"
+        "- Never include signatures, greetings metadata, or extra sections outside the required content."
     )
     user = (
         f"Case type: {case_name}\n"
         f"Primary language: {primary_language}\n"
-        f"Spoken languages (informational): {spoken_languages}\n\n"
         "Incoming complaint:\n"
         f"{complaint}\n\n"
         "Relevant knowledge-base entry:\n"
@@ -1092,11 +1098,7 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
         f"Policy: {policy or '(none)'}\n\n"
         "Selection rationale (internal):\n"
         f"{reason or '(none)'}\n\n"
-        "Line1 behavior by case type:\n"
-        "- If Case type is UNKNOWN: line1 must be the equivalent of "
-        '"[ACTION REQUIRED] I could not process this email automatically." in the primary language.\n'
-        "- If Case type is KNOWN: line1 must be the actual customer-facing reply in the customer's original language, "
-        "aligned with the policy, empathetic, and concise."
+        "Generate JSON exactly as requested."
     )
     resp = client.chat.completions.create(
         model=MODEL_NAME,
@@ -1111,19 +1113,19 @@ def _generate_reply_letter(complaint: str, selection: dict, primary_language: st
     except Exception:
         payload = {}
     line1 = re.sub(r"[\r\n]+", " ", str(payload.get("line1") or "")).strip()
-    translated_original = re.sub(r"[\r\n]+", " ", str(payload.get("translated_original") or "")).strip()
+    internal_translation_block = str(payload.get("internal_translation_block") or "")
+    internal_translation_block = internal_translation_block.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     if not line1:
         if is_unknown_case:
-            line1 = "[ACTION REQUIRED] I could not process this email automatically."
+            line1 = "[ACTION REQUIRED] I could not process this email automatically based on the knowledge base."
         else:
             line1 = "Thank you for your message. We are reviewing your case based on our policy."
 
-    if translated_original:
+    if internal_translation_block:
         return (
             f"{line1}\n"
-            f"--- Eredeti levél fordítása ({primary_language} nyelven) ---\n"
-            f"{translated_original}\n"
+            f"{internal_translation_block}\n"
             "--- Original Message ---\n"
             f"{complaint_for_output}"
         )
